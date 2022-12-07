@@ -1,9 +1,78 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
-const jwt = require('jsonwebtoken');
+const request = require('request');
 require('dotenv').config();
 const port = 3000;
+
+const getTokenOptions = {
+    method: 'POST',
+    url: `https://${process.env.AUTH0_DOMAIN}/oauth/token`,
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    form:
+    {
+        client_id: process.env.AUTH0_CLIENT_ID,
+        client_secret: process.env.AUTH0_CLIENT_SECRET,
+        audience: process.env.AUTH0_AUDIENCE,
+        grant_type: 'client_credentials'
+    }
+};
+
+const getUserTokenOptions = (login, password) => {
+   return {
+        method: 'POST',
+        url: `https://${process.env.AUTH0_DOMAIN}/oauth/token`,
+        headers: { 
+            'content-type': 'application/x-www-form-urlencoded'
+        },
+        form:
+        { 
+            grant_type: 'password',
+            username: login,
+            password: password,
+            audience: process.env.AUTH0_AUDIENCE,
+            scope: 'openid offline_access',
+            client_id: process.env.AUTH0_CLIENT_ID,
+            client_secret: process.env.AUTH0_CLIENT_SECRET 
+        }
+    };
+};
+
+const createUserOptions = (token, login, givenName, familyName, nickname, password) => {
+    return {
+        method: 'POST',
+        url: `https://${process.env.AUTH0_DOMAIN}/api/v2/users`,
+        headers: { 
+            'content-type': 'application/json', 
+            'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+            email: login,
+            given_name: givenName,
+            family_name: familyName,
+            nickname,
+            connection: 'Username-Password-Authentication',
+            password
+        })
+    };
+};
+
+const updateUserTokenOptions = (refreshToken) => {
+    return {
+        method: 'POST',
+        url: `https://${process.env.AUTH0_DOMAIN}/oauth/token`,
+        headers: {
+            'content-type': 'application/x-www-form-urlencoded'
+        },
+        form:
+        { 
+            grant_type: 'refresh_token',
+            client_id: process.env.AUTH0_CLIENT_ID,
+            client_secret: process.env.AUTH0_CLIENT_SECRET,
+            refresh_token: refreshToken
+        }
+    };
+}
 
 const app = express();
 app.use(bodyParser.json());
@@ -15,11 +84,11 @@ app.get('/', (req, res) => {
 
 	if (token) {
 		try {
-            // check token for validity
-			const claims = jwt.verify(token, process.env.JWT_SECRET_KEY);
+            // decode the token
+            const decodedToken = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
 
 			return res.json({
-				username: claims.username, // extract username from claims
+				username: decodedToken.nickname,
 				logout: 'http://localhost:3000/logout',
 			});
 		} catch (err) {
@@ -34,37 +103,65 @@ app.get('/logout', (req, res) => {
 	res.redirect('/');
 });
 
-const users = [
-	{
-		login: 'john74',
-		password: '123456',
-		username: 'John'
-	},
-	{
-		login: 'dmytr0',
-		password: '111111',
-		username: 'Dmytro'
-	}
-];
-
 app.post('/api/login', (req, res) => {
 	const { login, password } = req.body;
 
-	const user = users.find(user => user.login == login && user.password == password);
+    // try to authenticate
+    request(getUserTokenOptions(login, password), (error, response, body) => {
+        const data = JSON.parse(body);
 
-    // in case creds are valid
-	if (user) {
-        // generate a token 
-		const token = jwt.sign(
-			{ login: user.login, username: user.username },
-			process.env.JWT_SECRET_KEY,
-            { expiresIn: '1h' } // expiration time is set to 1 hour
-		);
-		res.json({ token });
-        return;
-	}
+        const { access_token } = data;
 
-	res.status(401).send('invalid creds');
+        if (access_token) {
+            return res.json({ ...data });
+        }
+
+        res.status(401).send();
+    });
+});
+
+app.post('/api/signup', (req, res) => {
+	const { login, givenName, familyName, nickname, password } = req.body;
+
+    request(getTokenOptions, (error, response, body) => {
+        const { access_token } = JSON.parse(body);
+
+        if (access_token) {
+            // create a new user
+            request(createUserOptions(access_token, login, givenName, familyName, nickname, password), (err, response, body) => {
+                const { message, statusCode, error } = JSON.parse(body);
+
+                // in case there is an error
+                if (error && message) {
+                    res.status(statusCode).send(message);
+                    return;
+                }
+        
+                return res.send('User was created successfully');
+            });
+        } else {
+            res.status(401).send();
+        }
+    });
+});
+
+
+app.post('/api/refreshToken', (req, res) => {
+	const { refreshToken } = req.body;
+
+    if (refreshToken) {
+        request(updateUserTokenOptions(refreshToken), (error, response, body) => {
+            const data = JSON.parse(body);
+
+            if (data.access_token) {
+                // return back newly generated access token
+                return res.json({ access_token: data.access_token });
+            }
+            res.status(401).send();
+        });
+    } else {
+        res.status(401).send();
+    }
 });
 
 app.listen(port, () => {
